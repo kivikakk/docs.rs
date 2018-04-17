@@ -45,6 +45,8 @@ mod builds;
 mod error;
 mod sitemap;
 
+use ammonia;
+use std::borrow::Cow;
 use std::env;
 use std::error::Error;
 use std::time::Duration;
@@ -299,6 +301,92 @@ fn match_version(conn: &Connection, name: &str, version: Option<&str>) -> Option
 }
 
 
+fn html_sanitizer<'a>() -> ammonia::Builder<'a> {
+    let tags = [
+        "a",
+        "b",
+        "blockquote",
+        "br",
+        "code",
+        "dd",
+        "del",
+        "dl",
+        "dt",
+        "em",
+        "h1",
+        "h2",
+        "h3",
+        "hr",
+        "i",
+        "img",
+        "input",
+        "kbd",
+        "li",
+        "ol",
+        "p",
+        "pre",
+        "s",
+        "strike",
+        "strong",
+        "sub",
+        "sup",
+        "table",
+        "tbody",
+        "td",
+        "th",
+        "thead",
+        "tr",
+        "ul",
+        "hr",
+        "span",
+    ].iter()
+        .cloned()
+        .collect();
+
+    let tag_attributes = [
+        ("a", ["href", "id", "target"].iter().cloned().collect()),
+        (
+            "img",
+            ["width", "height", "src", "alt", "align"]
+                .iter()
+                .cloned()
+                .collect(),
+        ),
+        (
+            "input",
+            ["checked", "disabled", "type"].iter().cloned().collect(),
+        ),
+    ].iter()
+        .cloned()
+        .collect();
+
+    // Constrain the type of the closures given to the HTML sanitizer.
+    fn constrain_closure<F>(f: F) -> F
+    where
+        F: for<'a> Fn(&'a str) -> Option<Cow<'a, str>> + Send + Sync,
+    {
+        f
+    }
+
+    let unrelative_url_sanitizer = constrain_closure(|url| {
+        // We have no base URL; allow fragment links only.
+        if url.starts_with('#') {
+            return Some(Cow::Borrowed(url));
+        }
+
+        None
+    });
+
+    let mut html_sanitizer = ammonia::Builder::new();
+    html_sanitizer
+        .link_rel(Some("nofollow noopener noreferrer"))
+        .tags(tags)
+        .tag_attributes(tag_attributes)
+        .url_relative(ammonia::UrlRelative::Custom(Box::new(unrelative_url_sanitizer)))
+        .id_prefix(Some("user-content-"));
+
+    html_sanitizer
+}
 
 
 
@@ -316,7 +404,8 @@ fn render_markdown(text: &str) -> String {
         options
     };
 
-    markdown_to_html(text, &options)
+    let html = markdown_to_html(text, &options);
+    html_sanitizer().clean(&html).to_string()
 }
 
 
@@ -487,5 +576,17 @@ mod test {
         assert_eq!(latest_version(&versions, "1.0.0"), Some("1.1.0".to_owned()));
         assert_eq!(latest_version(&versions, "0.9.0"), Some("1.1.0".to_owned()));
         assert_eq!(latest_version(&versions, "invalidversion"), None);
+    }
+
+    #[test]
+    fn test_render_markdown_safety() {
+        assert_eq!(render_markdown("[a](javascript:x)"),
+                   "<p><a rel=\"nofollow noopener noreferrer\">a</a></p>\n");
+
+        assert_eq!(render_markdown("<script>alert()</script>"),
+                   "alert()\n");
+
+        assert_eq!(render_markdown("<textarea>"),
+                   "");
     }
 }
